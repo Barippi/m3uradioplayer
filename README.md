@@ -4,6 +4,10 @@
 
 100% Vibe Coding.
 
+## Description
+
+M3U Radio Player is Internet Radio Player supports mp3, AAC, FLAC and ASIO.
+
 ## Need
 
 [bass.dll, bassasio.dll, bassflac.dll.](https://www.un4seen.com)
