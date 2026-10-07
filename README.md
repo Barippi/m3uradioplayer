@@ -6,7 +6,7 @@
 
 ## Description
 
-M3U Radio Player is Internet Radio Player supports mp3, AAC, FLAC and ASIO.
+M3U Radio Player is Internet Radio Player supports mp3, AAC, OGG, FLAC and ASIO.
 
 ## Need
 
