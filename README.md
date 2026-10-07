@@ -7,6 +7,7 @@
 ## Need
 
 [bass.dll, bassasio.dll, bassflac.dll.](https://www.un4seen.com)
+in same folder.
 
 ## How to use
 
