@@ -175,7 +175,7 @@ bassasio.BASS_ASIO_SetRate.argtypes = [ctypes.c_double]
 class RadioPlayer:
     def __init__(self, root):
         self.root = root
-        self.root.title("Internet Radio Player")
+        self.root.title("M3U Radio Player")
         self.root.geometry("650x820")
 
         self.base_dir = app_dir
