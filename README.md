@@ -6,9 +6,9 @@
 
 ## Description
 
-Windows Edition: M3U Radio Player is Internet Radio Player supports mp3, AAC, OGG, FLAC and ASIO.
+Windows: M3U Radio Player is Internet Radio Player supports mp3, AAC, OGG, FLAC and ASIO.
 
-Linux Edition: Suppots mp3, AAC, OGG, FLAC and Pipewire.
+Linux: Suppots mp3, AAC, OGG, FLAC and Pipewire.
 
 ## Need
 
