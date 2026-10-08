@@ -206,7 +206,7 @@ if IS_WINDOWS and bassasio:
 class UnifiedRadioPlayer:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"Internet Radio Player ({platform.system()})")
+        self.root.title(f"M3U Radio Player ({platform.system()})")
         self.root.geometry("660x800")
 
         self.base_dir = app_dir
