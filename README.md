@@ -26,7 +26,7 @@ python3-tk
 
 ### Both:
 
-M3U files that wrote internet radio stations.
+[M3U files that wrote internet radio stations.](https://github.com/junguler/m3u-radio-music-playlists)
 
 ## How to use
 
