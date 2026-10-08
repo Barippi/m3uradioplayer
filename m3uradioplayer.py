@@ -1,13 +1,17 @@
+#!/usr/bin/env python3
 import os
 import sys
 import glob
 import json
+import platform
 import urllib.request
 import threading
 import ctypes
-from ctypes import wintypes
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+
+IS_WINDOWS = platform.system() == "Windows"
+IS_LINUX = platform.system() == "Linux"
 
 # ==========================================
 # パス解決
@@ -25,7 +29,7 @@ def get_app_dir():
 bundle_dir = get_bundle_dir()
 app_dir = get_app_dir()
 
-def find_dll(filename):
+def find_binary(filename):
     p1 = os.path.join(bundle_dir, filename)
     if os.path.exists(p1):
         return p1
@@ -35,8 +39,32 @@ def find_dll(filename):
     return p1
 
 # ==========================================
+# 呼出規約・型ラッパーの共通化
+# ==========================================
+if IS_WINDOWS:
+    from ctypes import wintypes
+    B_BOOL = wintypes.BOOL
+    B_DWORD = wintypes.DWORD
+    B_HWND = wintypes.HWND
+    CALLBACK_TYPE = ctypes.WINFUNCTYPE
+    load_lib = ctypes.WinDLL
+else:
+    B_BOOL = ctypes.c_bool
+    B_DWORD = ctypes.c_uint32
+    B_HWND = ctypes.c_void_p
+    CALLBACK_TYPE = ctypes.CFUNCTYPE
+    load_lib = ctypes.CDLL
+
+# ==========================================
 # 構造体・コールバック型定義
 # ==========================================
+class BASS_DEVICEINFO(ctypes.Structure):
+    _fields_ = [
+        ("name", ctypes.c_char_p),
+        ("driver", ctypes.c_char_p),
+        ("flags", B_DWORD),
+    ]
+
 class BASS_ASIO_DEVICEINFO(ctypes.Structure):
     _fields_ = [
         ("name", ctypes.c_char_p),
@@ -45,20 +73,20 @@ class BASS_ASIO_DEVICEINFO(ctypes.Structure):
 
 class BASS_CHANNELINFO(ctypes.Structure):
     _fields_ = [
-        ("freq", wintypes.DWORD),
-        ("chans", wintypes.DWORD),
-        ("flags", wintypes.DWORD),
-        ("ctype", wintypes.DWORD),
-        ("origres", wintypes.DWORD),
-        ("plugin", wintypes.DWORD),
-        ("sample", wintypes.DWORD),
+        ("freq", B_DWORD),
+        ("chans", B_DWORD),
+        ("flags", B_DWORD),
+        ("ctype", B_DWORD),
+        ("origres", B_DWORD),
+        ("plugin", B_DWORD),
+        ("sample", B_DWORD),
         ("filename", ctypes.c_char_p),
     ]
 
-FILECLOSEPROC = ctypes.WINFUNCTYPE(None, ctypes.c_void_p)
-FILELENPROC = ctypes.WINFUNCTYPE(ctypes.c_uint64, ctypes.c_void_p)
-FILEREADPROC = ctypes.WINFUNCTYPE(wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p)
-FILESEEKPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, ctypes.c_uint64, ctypes.c_void_p)
+FILECLOSEPROC = CALLBACK_TYPE(None, ctypes.c_void_p)
+FILELENPROC = CALLBACK_TYPE(ctypes.c_uint64, ctypes.c_void_p)
+FILEREADPROC = CALLBACK_TYPE(B_DWORD, ctypes.c_void_p, B_DWORD, ctypes.c_void_p)
+FILESEEKPROC = CALLBACK_TYPE(B_BOOL, ctypes.c_uint64, ctypes.c_void_p)
 
 class BASS_FILEPROCS(ctypes.Structure):
     _fields_ = [
@@ -83,100 +111,103 @@ BASS_TAG_ICY = 4
 BASS_TAG_META = 5
 
 # ==========================================
-# DLL ロード
+# 動的ライブラリロード
 # ==========================================
-bass_path = find_dll("bass.dll")
-bassasio_path = find_dll("bassasio.dll")
-bassflac_path = find_dll("bassflac.dll")
+bass_name = "bass.dll" if IS_WINDOWS else "libbass.so"
+flac_name = "bassflac.dll" if IS_WINDOWS else "libbassflac.so"
+asio_name = "bassasio.dll" if IS_WINDOWS else None
+
+bass_path = find_binary(bass_name)
+flac_path = find_binary(flac_name)
+asio_path = find_binary(asio_name) if asio_name else None
 
 try:
-    bass = ctypes.WinDLL(bass_path)
-    bassasio = ctypes.WinDLL(bassasio_path)
-    bassflac = ctypes.WinDLL(bassflac_path) if os.path.exists(bassflac_path) else None
+    bass = load_lib(bass_path)
+    bassflac = load_lib(flac_path) if os.path.exists(flac_path) else None
+    bassasio = load_lib(asio_path) if (IS_WINDOWS and os.path.exists(asio_path)) else None
 except Exception as e:
     root = tk.Tk()
     root.withdraw()
     messagebox.showerror(
-        "DLLエラー",
-        "BASSライブラリの読み込みに失敗しました。\n"
-        f"探索先: {bundle_dir} / {app_dir}\n\n詳細: {e}"
+        "ライブラリエラー",
+        f"オーディオエンジンの読み込みに失敗しました。\nOS: {platform.system()}\n詳細: {e}"
     )
     sys.exit(1)
 
-# ==========================================
-# BASS 関数定義
-# ==========================================
-bass.BASS_Init.restype = wintypes.BOOL
-bass.BASS_Init.argtypes = [ctypes.c_int, wintypes.DWORD, wintypes.DWORD, wintypes.HWND, ctypes.c_void_p]
+# BASS 基本 API 定義
+bass.BASS_Init.restype = B_BOOL
+bass.BASS_Init.argtypes = [ctypes.c_int, B_DWORD, B_DWORD, B_HWND, ctypes.c_void_p]
 
-bass.BASS_SetConfig.restype = wintypes.BOOL
-bass.BASS_SetConfig.argtypes = [wintypes.DWORD, wintypes.DWORD]
+bass.BASS_SetConfig.restype = B_BOOL
+bass.BASS_SetConfig.argtypes = [B_DWORD, B_DWORD]
 
 bass.BASS_ErrorGetCode.restype = ctypes.c_int
 bass.BASS_ErrorGetCode.argtypes = []
 
-bass.BASS_PluginLoad.restype = wintypes.DWORD
-bass.BASS_PluginLoad.argtypes = [ctypes.c_char_p, wintypes.DWORD]
+bass.BASS_GetDeviceInfo.restype = B_BOOL
+bass.BASS_GetDeviceInfo.argtypes = [B_DWORD, ctypes.POINTER(BASS_DEVICEINFO)]
 
-bass.BASS_StreamCreateURL.restype = wintypes.DWORD
-bass.BASS_StreamCreateURL.argtypes = [ctypes.c_char_p, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p]
+bass.BASS_PluginLoad.restype = B_DWORD
+bass.BASS_PluginLoad.argtypes = [ctypes.c_char_p, B_DWORD]
 
-bass.BASS_StreamCreateFileUser.restype = wintypes.DWORD
-bass.BASS_StreamCreateFileUser.argtypes = [wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(BASS_FILEPROCS), ctypes.c_void_p]
+bass.BASS_StreamCreateURL.restype = B_DWORD
+bass.BASS_StreamCreateURL.argtypes = [ctypes.c_char_p, B_DWORD, B_DWORD, ctypes.c_void_p, ctypes.c_void_p]
 
-bass.BASS_StreamFree.restype = wintypes.BOOL
-bass.BASS_StreamFree.argtypes = [wintypes.DWORD]
+bass.BASS_StreamCreateFileUser.restype = B_DWORD
+bass.BASS_StreamCreateFileUser.argtypes = [B_DWORD, B_DWORD, ctypes.POINTER(BASS_FILEPROCS), ctypes.c_void_p]
 
-bass.BASS_ChannelPlay.restype = wintypes.BOOL
-bass.BASS_ChannelPlay.argtypes = [wintypes.DWORD, wintypes.BOOL]
+bass.BASS_StreamFree.restype = B_BOOL
+bass.BASS_StreamFree.argtypes = [B_DWORD]
 
-bass.BASS_ChannelStop.restype = wintypes.BOOL
-bass.BASS_ChannelStop.argtypes = [wintypes.DWORD]
+bass.BASS_ChannelPlay.restype = B_BOOL
+bass.BASS_ChannelPlay.argtypes = [B_DWORD, B_BOOL]
 
-bass.BASS_ChannelGetInfo.restype = wintypes.BOOL
-bass.BASS_ChannelGetInfo.argtypes = [wintypes.DWORD, ctypes.POINTER(BASS_CHANNELINFO)]
+bass.BASS_ChannelStop.restype = B_BOOL
+bass.BASS_ChannelStop.argtypes = [B_DWORD]
+
+bass.BASS_ChannelGetInfo.restype = B_BOOL
+bass.BASS_ChannelGetInfo.argtypes = [B_DWORD, ctypes.POINTER(BASS_CHANNELINFO)]
 
 bass.BASS_ChannelGetTags.restype = ctypes.c_void_p
-bass.BASS_ChannelGetTags.argtypes = [wintypes.DWORD, wintypes.DWORD]
+bass.BASS_ChannelGetTags.argtypes = [B_DWORD, B_DWORD]
 
-bass.BASS_Free.restype = wintypes.BOOL
+bass.BASS_Free.restype = B_BOOL
 bass.BASS_Free.argtypes = []
 
+# Windows 用 BASSASIO API 定義
+if IS_WINDOWS and bassasio:
+    bassasio.BASS_ASIO_GetDeviceInfo.restype = B_BOOL
+    bassasio.BASS_ASIO_GetDeviceInfo.argtypes = [B_DWORD, ctypes.POINTER(BASS_ASIO_DEVICEINFO)]
+
+    bassasio.BASS_ASIO_Init.restype = B_BOOL
+    bassasio.BASS_ASIO_Init.argtypes = [B_DWORD, B_DWORD]
+
+    bassasio.BASS_ASIO_Free.restype = B_BOOL
+    bassasio.BASS_ASIO_Free.argtypes = []
+
+    bassasio.BASS_ASIO_Start.restype = B_BOOL
+    bassasio.BASS_ASIO_Start.argtypes = [B_DWORD, B_DWORD]
+
+    bassasio.BASS_ASIO_Stop.restype = B_BOOL
+    bassasio.BASS_ASIO_Stop.argtypes = []
+
+    bassasio.BASS_ASIO_ChannelEnableBASS.restype = B_BOOL
+    bassasio.BASS_ASIO_ChannelEnableBASS.argtypes = [B_BOOL, B_DWORD, B_DWORD, B_BOOL]
+
+    bassasio.BASS_ASIO_ChannelReset.restype = B_BOOL
+    bassasio.BASS_ASIO_ChannelReset.argtypes = [B_BOOL, ctypes.c_int, B_DWORD]
+
+    bassasio.BASS_ASIO_SetRate.restype = B_BOOL
+    bassasio.BASS_ASIO_SetRate.argtypes = [ctypes.c_double]
+
 # ==========================================
-# BASSASIO 関数定義
+# GUI アプリケーション本体
 # ==========================================
-bassasio.BASS_ASIO_GetDeviceInfo.restype = wintypes.BOOL
-bassasio.BASS_ASIO_GetDeviceInfo.argtypes = [wintypes.DWORD, ctypes.POINTER(BASS_ASIO_DEVICEINFO)]
-
-bassasio.BASS_ASIO_Init.restype = wintypes.BOOL
-bassasio.BASS_ASIO_Init.argtypes = [wintypes.DWORD, wintypes.DWORD]
-
-bassasio.BASS_ASIO_Free.restype = wintypes.BOOL
-bassasio.BASS_ASIO_Free.argtypes = []
-
-bassasio.BASS_ASIO_Start.restype = wintypes.BOOL
-bassasio.BASS_ASIO_Start.argtypes = [wintypes.DWORD, wintypes.DWORD]
-
-bassasio.BASS_ASIO_Stop.restype = wintypes.BOOL
-bassasio.BASS_ASIO_Stop.argtypes = []
-
-bassasio.BASS_ASIO_ChannelEnableBASS.restype = wintypes.BOOL
-bassasio.BASS_ASIO_ChannelEnableBASS.argtypes = [wintypes.BOOL, wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
-
-bassasio.BASS_ASIO_ChannelReset.restype = wintypes.BOOL
-bassasio.BASS_ASIO_ChannelReset.argtypes = [wintypes.BOOL, ctypes.c_int, wintypes.DWORD]
-
-bassasio.BASS_ASIO_SetRate.restype = wintypes.BOOL
-bassasio.BASS_ASIO_SetRate.argtypes = [ctypes.c_double]
-
-# ==========================================
-# GUI アプリ本体
-# ==========================================
-class RadioPlayer:
+class UnifiedRadioPlayer:
     def __init__(self, root):
         self.root = root
-        self.root.title("M3U Radio Player")
-        self.root.geometry("650x820")
+        self.root.title(f"Internet Radio Player ({platform.system()})")
+        self.root.geometry("660x800")
 
         self.base_dir = app_dir
         self.current_m3u_path = None
@@ -184,24 +215,24 @@ class RadioPlayer:
         self.asio_devices = []
         self.current_device_id = -1
         self.stream_handle = 0
+        self.current_station_name = ""
         self.current_url = ""
         self.current_title = ""
 
         self.http_response = None
         self.stop_stream_flag = False
 
-        # BASS 初期化（デバイス -1: 既定の Windows オーディオデバイスで初期化）
-        # これにより WASAPI 共有出力が可能になります
-        bass.BASS_Init(-1, 44100, 0, None, None)
-        bass.BASS_SetConfig(BASS_CONFIG_NET_TIMEOUT, 15000)
-        bass.BASS_SetConfig(BASS_CONFIG_NET_BUFFER, 5000)
-        bass.BASS_SetConfig(BASS_CONFIG_NET_PREBUF, 50)
-        bass.BASS_SetConfig(BASS_CONFIG_NET_META, 1)
+        # 出力モード（Windows: asio/wasapi, Linux: pipewire）
+        self.output_mode = tk.StringVar(value="asio" if IS_WINDOWS else "pipewire")
 
-        # FLAC プラグイン登録
+        # 1. BASS 初期化
+        self.init_bass_engine()
+
+        # 2. FLAC プラグインロード
         self.flac_loaded = False
-        if os.path.exists(bassflac_path):
-            plugin = bass.BASS_PluginLoad(bassflac_path.encode("mbcs"), 0)
+        if os.path.exists(flac_path):
+            encode_path = flac_path.encode("mbcs" if IS_WINDOWS else "utf-8")
+            plugin = bass.BASS_PluginLoad(encode_path, 0)
             if plugin != 0:
                 self.flac_loaded = True
 
@@ -218,9 +249,36 @@ class RadioPlayer:
         )
 
         self.create_widgets()
-        self.load_asio_devices()
+
+        if IS_WINDOWS and bassasio:
+            self.load_asio_devices()
+
         self.refresh_m3u_list()
         self.poll_metadata()
+
+    def init_bass_engine(self):
+        """OSに応じた最適なオーディオデバイスで初期化"""
+        bass.BASS_SetConfig(BASS_CONFIG_NET_TIMEOUT, 15000)
+        bass.BASS_SetConfig(BASS_CONFIG_NET_BUFFER, 5000)
+        bass.BASS_SetConfig(BASS_CONFIG_NET_PREBUF, 50)
+        bass.BASS_SetConfig(BASS_CONFIG_NET_META, 1)
+
+        if IS_WINDOWS:
+            # WASAPI 共有用として既定の Windows デバイス (-1) で初期化
+            bass.BASS_Init(-1, 44100, 0, None, None)
+        else:
+            # Linux: 有効な ALSA / PipeWire デバイスを検出して初期化
+            init_ok = False
+            info = BASS_DEVICEINFO()
+            dev_idx = 1
+            while bass.BASS_GetDeviceInfo(dev_idx, ctypes.byref(info)):
+                if info.flags & 1:  # BASS_DEVICE_ENABLED
+                    if bass.BASS_Init(dev_idx, 48000, 0, None, None):
+                        init_ok = True
+                        break
+                dev_idx += 1
+            if not init_ok:
+                bass.BASS_Init(1, 48000, 0, None, None)
 
     def _cb_close(self, user):
         if self.http_response:
@@ -263,59 +321,61 @@ class RadioPlayer:
         reload_btn = ttk.Button(m3u_frame, text="再読込", width=7, command=self.refresh_m3u_list)
         reload_btn.pack(side=tk.RIGHT)
 
-        # 2. オーディオ出力設定（モード選択 ＋ ASIOデバイス設定）
+        # 2. オーディオ出力設定
         out_frame = ttk.LabelFrame(self.root, text="オーディオ出力設定", padding=8)
         out_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        # 出力モード切り替え（ラジオボタン）
-        mode_box = ttk.Frame(out_frame)
-        mode_box.pack(fill=tk.X, pady=(0, 6))
+        if IS_WINDOWS:
+            mode_box = ttk.Frame(out_frame)
+            mode_box.pack(fill=tk.X, pady=(0, 6))
 
-        ttk.Label(mode_box, text="出力モード:").pack(side=tk.LEFT, padx=(0, 10))
+            ttk.Label(mode_box, text="出力モード:").pack(side=tk.LEFT, padx=(0, 10))
 
-        self.output_mode = tk.StringVar(value="asio")
-        self.rb_asio = ttk.Radiobutton(
-            mode_box, text="ASIO (ビットパーフェクト)", value="asio",
-            variable=self.output_mode, command=self.on_mode_changed
-        )
-        self.rb_asio.pack(side=tk.LEFT, padx=5)
+            rb_asio = ttk.Radiobutton(
+                mode_box, text="ASIO (排他/ビットパーフェクト)", value="asio",
+                variable=self.output_mode, command=self.on_mode_changed
+            )
+            rb_asio.pack(side=tk.LEFT, padx=5)
 
-        self.rb_wasapi = ttk.Radiobutton(
-            mode_box, text="WASAPI 共有モード (Windows標準)", value="wasapi",
-            variable=self.output_mode, command=self.on_mode_changed
-        )
-        self.rb_wasapi.pack(side=tk.LEFT, padx=5)
+            rb_wasapi = ttk.Radiobutton(
+                mode_box, text="WASAPI 共有モード", value="wasapi",
+                variable=self.output_mode, command=self.on_mode_changed
+            )
+            rb_wasapi.pack(side=tk.LEFT, padx=5)
 
-        # ASIO デバイス選択コンボボックス
-        self.asio_box = ttk.Frame(out_frame)
-        self.asio_box.pack(fill=tk.X)
+            self.asio_box = ttk.Frame(out_frame)
+            self.asio_box.pack(fill=tk.X)
 
-        ttk.Label(self.asio_box, text="ASIOドライバ:").pack(side=tk.LEFT, padx=(0, 5))
+            ttk.Label(self.asio_box, text="ASIOドライバ:").pack(side=tk.LEFT, padx=(0, 5))
+            self.device_combo = ttk.Combobox(self.asio_box, state="readonly")
+            self.device_combo.pack(fill=tk.X, side=tk.LEFT, expand=True, padx=(0, 5))
+            self.device_combo.bind("<<ComboboxSelected>>", self.on_device_selected)
 
-        self.device_combo = ttk.Combobox(self.asio_box, state="readonly")
-        self.device_combo.pack(fill=tk.X, side=tk.LEFT, expand=True, padx=(0, 5))
-        self.device_combo.bind("<<ComboboxSelected>>", self.on_device_selected)
+            refresh_dev_btn = ttk.Button(self.asio_box, text="更新", width=7, command=self.load_asio_devices)
+            refresh_dev_btn.pack(side=tk.RIGHT)
+        else:
+            linux_box = ttk.Frame(out_frame)
+            linux_box.pack(fill=tk.X)
+            ttk.Label(linux_box, text="バックエンド: PipeWire / ALSA 直結 (自動追従)").pack(side=tk.LEFT)
 
-        refresh_dev_btn = ttk.Button(self.asio_box, text="更新", width=7, command=self.load_asio_devices)
-        refresh_dev_btn.pack(side=tk.RIGHT)
-
-        # 3. 再生情報（曲名強調）
+        # 3. Now Playing
+        font_family = "Segoe UI" if IS_WINDOWS else "Sans"
         info_frame = ttk.LabelFrame(self.root, text="Now Playing", padding=12)
         info_frame.pack(fill=tk.X, padx=10, pady=5)
 
         self.track_label = ttk.Label(
             info_frame,
             text="再生待機中",
-            font=("Segoe UI", 15, "bold"),
+            font=(font_family, 15, "bold"),
             foreground="#004488",
-            wraplength=600
+            wraplength=610
         )
         self.track_label.pack(anchor="w", pady=(0, 4))
 
         self.station_label = ttk.Label(
             info_frame,
             text="局: 停止中",
-            font=("Segoe UI", 9),
+            font=(font_family, 9),
             foreground="#555555"
         )
         self.station_label.pack(anchor="w")
@@ -328,7 +388,7 @@ class RadioPlayer:
         self.tree.heading("#0", text="局名")
         self.tree.heading("URL", text="ストリームURL")
         self.tree.column("#0", width=220)
-        self.tree.column("URL", width=380)
+        self.tree.column("URL", width=390)
         self.tree.pack(fill=tk.BOTH, expand=True)
 
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
@@ -338,14 +398,16 @@ class RadioPlayer:
         ctrl_frame.pack(fill=tk.X, padx=10, pady=5)
 
         flac_status = "FLAC有効" if self.flac_loaded else "FLAC未認識"
-        self.status_lbl = ttk.Label(ctrl_frame, text=f"出力: ASIO | {flac_status}", foreground="#007700")
+        default_status = f"OS: {platform.system()} | {flac_status}"
+        self.status_lbl = ttk.Label(ctrl_frame, text=default_status, foreground="#007700")
         self.status_lbl.pack(side=tk.LEFT, padx=5)
 
         self.stop_btn = ttk.Button(ctrl_frame, text="停止", width=10, command=self.stop)
         self.stop_btn.pack(side=tk.RIGHT, padx=5)
 
     def on_mode_changed(self):
-        """出力モード（ASIO / WASAPI共有）切り替え時"""
+        if not IS_WINDOWS:
+            return
         mode = self.output_mode.get()
         if mode == "asio":
             self.device_combo.config(state="readonly")
@@ -354,13 +416,12 @@ class RadioPlayer:
             self.device_combo.config(state="disabled")
             self.status_lbl.config(text="出力: WASAPI 共有モード", foreground="#004488")
 
-        # 再生中であれば新しいモードで自動再スタート
         if self.stream_handle and self.current_station_name and self.current_url:
-            station_name = self.current_station_name
-            url = self.current_url
-            self.play(station_name, url)
+            self.play(self.current_station_name, self.current_url)
 
     def load_asio_devices(self):
+        if not (IS_WINDOWS and bassasio):
+            return
         self.asio_devices.clear()
         device_names = []
         info = BASS_ASIO_DEVICEINFO()
@@ -379,16 +440,15 @@ class RadioPlayer:
         else:
             self.device_combo["values"] = ["ASIOドライバが見つかりません"]
             self.device_combo.current(0)
-            if self.output_mode.get() == "asio":
-                self.status_lbl.config(text="ASIO未検出", foreground="#cc0000")
 
     def on_device_selected(self, event):
         idx = self.device_combo.current()
         if 0 <= idx < len(self.asio_devices):
-            dev_id = self.asio_devices[idx][0]
-            self.init_asio_device(dev_id)
+            self.init_asio_device(self.asio_devices[idx][0])
 
     def init_asio_device(self, dev_id):
+        if not (IS_WINDOWS and bassasio):
+            return
         if self.current_device_id == dev_id:
             return
 
@@ -400,9 +460,6 @@ class RadioPlayer:
             dev_name = self.asio_devices[dev_id][1]
             if self.output_mode.get() == "asio":
                 self.status_lbl.config(text=f"ASIO: {dev_name} (接続)", foreground="#007700")
-        else:
-            if self.output_mode.get() == "asio":
-                self.status_lbl.config(text="ASIO初期化失敗", foreground="#cc0000")
 
     def refresh_m3u_list(self):
         m3u_patterns = [
@@ -514,23 +571,19 @@ class RadioPlayer:
         self.current_title = ""
         self.stop_stream_flag = False
 
-        use_asio = (self.output_mode.get() == "asio")
+        use_asio = (IS_WINDOWS and self.output_mode.get() == "asio")
 
-        # ASIO の時は PCM デコードのみ行う BASS_STREAM_DECODE を指定
-        # WASAPI 共有モードの時は 通常再生ストリームとして作成
         flags = BASS_STREAM_STATUS
         if use_asio:
             flags |= BASS_STREAM_DECODE
 
         self.stream_handle = 0
 
-        # Radio Paradise または FLAC 局の場合は、Python経由で接続して直通ストリームを作成
+        # Radio Paradise または FLAC 局の場合は、Python経由でヘッダーを偽装して接続
         if is_rp or "flac" in target_url.lower():
             try:
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)',
-                    'Icy-MetaData': '1'
-                }
+                ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' if IS_WINDOWS else 'Mozilla/5.0 (X11; Linux x86_64)'
+                headers = {'User-Agent': ua, 'Icy-MetaData': '1'}
                 req = urllib.request.Request(target_url, headers=headers)
                 self.http_response = urllib.request.urlopen(req, timeout=10)
 
@@ -556,19 +609,9 @@ class RadioPlayer:
 
         if not self.stream_handle:
             err_code = bass.BASS_ErrorGetCode()
-            err_desc_map = {
-                2: "ファイル/URLが見つかりません (BASS_ERROR_FILEOPEN)",
-                3: "ドライバエラー (BASS_ERROR_DRIVER)",
-                6: "フォーマット非対応 (BASS_ERROR_FORMAT)",
-                31: "SSL/TLS接続エラー (BASS_ERROR_SSL)",
-                37: "要求された機能は利用できません (BASS_ERROR_NOTAVAIL)",
-                40: "接続タイムアウト (BASS_ERROR_TIMEOUT)",
-                41: "コーデック未対応 (BASS_ERROR_FILEFORM)",
-            }
-            detail = err_desc_map.get(err_code, f"エラーコード: {err_code}")
             messagebox.showerror(
                 "再生エラー",
-                f"ストリームを開けませんでした。\n\n【詳細】 {detail}\n【URL】 {target_url}"
+                f"ストリームを開けませんでした。\nエラーコード: {err_code}\nURL: {target_url}"
             )
             self.track_label.config(text="停止中")
             return
@@ -576,15 +619,14 @@ class RadioPlayer:
         info = BASS_CHANNELINFO()
         bass.BASS_ChannelGetInfo(self.stream_handle, ctypes.byref(info))
 
-        # 出力モードに応じた再生処理
-        if use_asio:
-            # ASIO 出力
+        # 出力振り分け
+        if use_asio and bassasio:
             bassasio.BASS_ASIO_SetRate(ctypes.c_double(info.freq))
             bassasio.BASS_ASIO_ChannelReset(False, -1, 0)
             bassasio.BASS_ASIO_ChannelEnableBASS(False, 0, self.stream_handle, True)
             bassasio.BASS_ASIO_Start(0, 0)
         else:
-            # WASAPI 共有モード（Windows 既定オーディオ経由で直接再生）
+            # Linux (PipeWire/ALSA) または Windows WASAPI共有モード
             bass.BASS_ChannelPlay(self.stream_handle, False)
 
         self.track_label.config(text="再生中 (曲名取得中...)")
@@ -596,7 +638,7 @@ class RadioPlayer:
 
         found_title = ""
 
-        # 1. BASS_TAG_META
+        # 1. BASS_TAG_META (DI.FM, SomaFM などの ICY チャンク)
         meta_ptr = bass.BASS_ChannelGetTags(self.stream_handle, BASS_TAG_META)
         if meta_ptr:
             try:
@@ -611,7 +653,7 @@ class RadioPlayer:
             except Exception:
                 pass
 
-        # 2. BASS_TAG_OGG
+        # 2. BASS_TAG_OGG (Vorbis Comment)
         if not found_title:
             ogg_ptr = bass.BASS_ChannelGetTags(self.stream_handle, BASS_TAG_OGG)
             if ogg_ptr:
@@ -637,7 +679,7 @@ class RadioPlayer:
                 except Exception:
                     pass
 
-        # 3. BASS_TAG_ICY
+        # 3. BASS_TAG_ICY (フォールバック)
         if not found_title and not self.current_title:
             icy_ptr = bass.BASS_ChannelGetTags(self.stream_handle, BASS_TAG_ICY)
             if icy_ptr:
@@ -702,11 +744,12 @@ class RadioPlayer:
             self.http_response = None
 
         if self.stream_handle:
-            # ASIO 停止
-            bassasio.BASS_ASIO_Stop()
-            bassasio.BASS_ASIO_ChannelReset(False, -1, 0)
-            # WASAPI/BASS ストリーム停止・解放
-            bass.BASS_ChannelStop(self.stream_handle)
+            if IS_WINDOWS and bassasio and self.output_mode.get() == "asio":
+                bassasio.BASS_ASIO_Stop()
+                bassasio.BASS_ASIO_ChannelReset(False, -1, 0)
+            else:
+                bass.BASS_ChannelStop(self.stream_handle)
+
             bass.BASS_StreamFree(self.stream_handle)
             self.stream_handle = 0
 
@@ -717,12 +760,13 @@ class RadioPlayer:
 
     def on_closing(self):
         self.stop()
-        bassasio.BASS_ASIO_Free()
+        if IS_WINDOWS and bassasio:
+            bassasio.BASS_ASIO_Free()
         bass.BASS_Free()
         self.root.destroy()
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = RadioPlayer(root)
+    app = UnifiedRadioPlayer(root)
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
     root.mainloop()
