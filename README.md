@@ -35,7 +35,7 @@ python3-tk
 In PowerShell,
 
 ```
-python .\m3uradioplayer-w.py
+python .\m3uradioplayer.py
 ```
 
 If you want exe file,
@@ -43,7 +43,7 @@ If you want exe file,
 ```
 python -m pip install pyinstaller
 
-python -m PyInstaller --noconsole --onefile --add-binary ".\bass.dll;." --add-binary ".\bassasio.dll;." --add-binary ".\bassflac.dll;." .\m3uradioplayer-w.py
+python -m PyInstaller --noconsole --onefile --add-binary ".\bass.dll;." --add-binary ".\bassasio.dll;." --add-binary ".\bassflac.dll;." .\m3uradioplayer.py
 
 ```
 
@@ -52,7 +52,7 @@ python -m PyInstaller --noconsole --onefile --add-binary ".\bass.dll;." --add-bi
 In Terminal Emulator,
 
 ```
-python3 m3uradioplayer-l.py
+python3 m3uradioplayer.py
 ```
 
 
