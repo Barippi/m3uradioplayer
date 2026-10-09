@@ -19,7 +19,7 @@ in same folder.
 
 ### Linux:
 
-[bass.so,bassflac.so.](https://www.un4seen.com)
+[libbass.so,libbassflac.so.](https://www.un4seen.com)
 in same folder.
 
 python3-tk
