@@ -273,12 +273,12 @@ class UnifiedRadioPlayer:
             dev_idx = 1
             while bass.BASS_GetDeviceInfo(dev_idx, ctypes.byref(info)):
                 if info.flags & 1:  # BASS_DEVICE_ENABLED
-                    if bass.BASS_Init(dev_idx, 48000, 0, None, None):
+                    if bass.BASS_Init(dev_idx, 44100, 0, None, None):
                         init_ok = True
                         break
                 dev_idx += 1
             if not init_ok:
-                bass.BASS_Init(1, 48000, 0, None, None)
+                bass.BASS_Init(1, 44100, 0, None, None)
 
     def _cb_close(self, user):
         if self.http_response:
