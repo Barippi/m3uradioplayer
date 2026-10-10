@@ -55,6 +55,22 @@ In Terminal Emulator,
 python3 m3uradioplayer.py
 ```
 
+If you want executable file,
+
+```
+sudo apt install pipx
+
+pipx ensurepath
+
+source ~/.bashrc
+
+pipx install pyinstaller
+
+pyinstaller --noconsole --onefile \
+  --add-binary "./libbass.so:." \
+  --add-binary "./libbassflac.so:." \
+  m3uradioplayer.py
+```
 
 
 
