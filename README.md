@@ -10,6 +10,10 @@ Windows: M3U Radio Player is Internet Radio Player supports mp3, AAC, OGG, FLAC 
 
 Linux: Suppots mp3, AAC, OGG, FLAC and Pipewire.
 
+## Screenshot
+
+![Linux](https://github.com/Barippi/m3uradioplayer/blob/main/linux.png)
+
 ## Need
 
 ### Windows:
