@@ -207,6 +207,18 @@ class UnifiedRadioPlayer:
     def __init__(self, root):
         self.root = root
         self.root.title(f"M3U Radio Player ({platform.system()})")
+        # アイコン設定（ファイルが存在する場合に適用）
+        icon_png_path = os.path.join(app_dir, "m3u_radio_player.png")
+        icon_ico_path = os.path.join(app_dir, "m3u_radio_player.ico")
+
+        if IS_WINDOWS and os.path.exists(icon_ico_path):
+            self.root.iconbitmap(default=icon_ico_path)
+        elif os.path.exists(icon_png_path):
+            try:
+                icon_img = tk.PhotoImage(file=icon_png_path)
+                self.root.iconphoto(True, icon_img)
+            except Exception:
+                pass
         self.root.geometry("660x800")
 
         self.base_dir = app_dir
