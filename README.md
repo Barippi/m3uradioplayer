@@ -77,8 +77,10 @@ source ~/.bashrc
 pipx install pyinstaller
 
 pyinstaller --noconsole --onefile \
+  --name "m3u-radio-player" \
   --add-binary "./libbass.so:." \
   --add-binary "./libbassflac.so:." \
+  --add-data "./m3u_radio_player.png:." \
   m3uradioplayer.py
 ```
 
