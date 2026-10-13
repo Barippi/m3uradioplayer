@@ -47,7 +47,13 @@ If you want exe file,
 ```
 python -m pip install pyinstaller
 
-python -m PyInstaller --noconsole --onefile --add-binary ".\bass.dll;." --add-binary ".\bassasio.dll;." --add-binary ".\bassflac.dll;." .\m3uradioplayer.py
+python -m PyInstaller --noconsole --onefile `
+  --name "M3U Radio Player" `
+  --icon ".\m3u_radio_player.ico" `
+  --add-binary ".\bass.dll;." `
+  --add-binary ".\bassasio.dll;." `
+  --add-binary ".\bassflac.dll;." `
+  .\m3uradioplayer.py
 
 ```
 
