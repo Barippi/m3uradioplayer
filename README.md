@@ -39,6 +39,7 @@ python3-tk
 In PowerShell,
 
 ```
+python -m pip install tk
 python .\m3uradioplayer.py
 ```
 
@@ -62,6 +63,7 @@ python -m PyInstaller --noconsole --onefile `
 In Terminal Emulator,
 
 ```
+sudo apt install python3-tk
 python3 m3uradioplayer.py
 ```
 
