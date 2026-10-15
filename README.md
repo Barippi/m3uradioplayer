@@ -13,6 +13,7 @@ Linux: Supports mp3, AAC, OGG, FLAC and Pipewire.
 ## Screenshot
 
 <img width="682" height="912" alt="image" src="https://github.com/user-attachments/assets/8b0d63bc-eac2-401e-811d-6da81c7470d6" />
+<img width="810" height="1038" alt="スクリーンショット_20261016_020515" src="https://github.com/user-attachments/assets/fcff5cf2-bcf7-43bd-afa4-6ca1ee94960a" />
 
 
 ## Need
