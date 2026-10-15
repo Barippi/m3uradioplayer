@@ -5,10 +5,11 @@ M3U Radio Player
 Cross-platform internet radio player using BASS audio library.
 Supports:
   - Windows: 標準 (DirectSound / BASS Direct), ASIO
-  - Linux: PipeWire / ALSA
+  - Linux: PipeWire / ALSA (Hardware/OS volume is untouched; BASS internal volume only)
   - Multi-M3U playlist switching
   - Dynamic device switching across all audio endpoints
-  - Full output gain & device volume fix (BASS_SetVolume)
+  - Full output gain & volume normalization
+  - Metadata decode with HTML entity unescaping & multi-charset fallback
 """
 
 import sys
@@ -20,6 +21,7 @@ import urllib.request
 import urllib.parse
 import threading
 import time
+import html
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -183,7 +185,6 @@ if bass:
     bass.BASS_ChannelGetTags.argtypes = [B_DWORD, B_DWORD]
     bass.BASS_ErrorGetCode.restype = ctypes.c_int
 
-# BASSASIO プロトタイプ定義 (公式仕様に準拠)
 if bassasio:
     class BASS_ASIO_DEVICEINFO(ctypes.Structure):
         _fields_ = [("name", ctypes.c_char_p), ("driver", ctypes.c_char_p)]
@@ -387,7 +388,7 @@ class M3URadioPlayer:
         self.lbl_vol.config(text=f"{percent}%")
         if self.stream_handle and bass:
             bass.BASS_ChannelSetAttribute(self.stream_handle, BASS_ATTRIB_VOL, ctypes.c_float(self.current_volume))
-        if bass:
+        if IS_WINDOWS and bass:
             bass.BASS_SetVolume(ctypes.c_float(self.current_volume))
 
     def update_device_list(self):
@@ -400,7 +401,6 @@ class M3URadioPlayer:
             if mode == "ASIO" and bassasio:
                 info = BASS_ASIO_DEVICEINFO()
                 idx = 0
-                # BASS_ASIO_GetDeviceInfo を 0 から呼び出し、False が返るまで安全に列挙
                 while bassasio.BASS_ASIO_GetDeviceInfo(idx, ctypes.byref(info)):
                     raw = info.name or b""
                     try:
@@ -431,7 +431,7 @@ class M3URadioPlayer:
                             self.device_mapping.append(idx)
                     idx += 1
         else:
-            dev_names = ["PipeWire / デフォルト出力"]
+            dev_names = ["PipeWire / ALSA デフォルト出力"]
             self.device_mapping = [-1]
 
         if not dev_names:
@@ -545,7 +545,9 @@ class M3URadioPlayer:
                 self.current_active_device = target_device
 
             bass.BASS_SetDevice(target_device)
-            bass.BASS_SetVolume(ctypes.c_float(1.0))
+
+            if IS_WINDOWS:
+                bass.BASS_SetVolume(ctypes.c_float(1.0))
         else:
             if self.current_active_device != -1:
                 bass.BASS_Free()
@@ -598,7 +600,7 @@ class M3URadioPlayer:
             self.root.after(0, lambda: self.lbl_station.config(text="出力デバイスの起動に失敗しました"))
 
     # ==========================================
-    # メタデータ処理
+    # メタデータ処理 (HTML実体参照解除 & 文字化け対応)
     # ==========================================
     def _setup_meta_sync(self, handle):
         def _sync_callback(sync_handle, channel, data, user):
@@ -612,13 +614,21 @@ class M3URadioPlayer:
         tag_meta = bass.BASS_ChannelGetTags(handle, BASS_TAG_META)
         if tag_meta:
             try:
-                meta_str = tag_meta.decode('utf-8', errors='ignore')
+                meta_str = ""
+                for enc in ['utf-8', 'cp932', 'latin-1']:
+                    try:
+                        meta_str = tag_meta.decode(enc)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+
                 if "StreamTitle='" in meta_str:
                     track = meta_str.split("StreamTitle='")[1].split("';")[0]
+                    track = html.unescape(track).strip()
                     self.lbl_track.config(text=f"タイトル: {track}")
                     return
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Meta Error] {e}")
 
         tag_ogg = bass.BASS_ChannelGetTags(handle, BASS_TAG_OGG)
         if tag_ogg:
@@ -634,8 +644,8 @@ class M3URadioPlayer:
                         comments[k.upper()] = v
                     ptr += len(s.encode('utf-8')) + 1
 
-                artist = comments.get("ARTIST", "")
-                title = comments.get("TITLE", "")
+                artist = html.unescape(comments.get("ARTIST", "")).strip()
+                title = html.unescape(comments.get("TITLE", "")).strip()
                 if artist and title:
                     self.lbl_track.config(text=f"タイトル: {artist} - {title}")
                     return
@@ -655,3 +665,4 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = M3URadioPlayer(root)
     root.mainloop()
+
