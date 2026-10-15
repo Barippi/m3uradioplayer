@@ -1,74 +1,72 @@
 #!/usr/bin/env python3
-import os
+# -*- coding: utf-8 -*-
+"""
+M3U Radio Player
+Cross-platform internet radio player using BASS audio library.
+Supports:
+  - Windows: 標準 (DirectSound / BASS Direct), ASIO
+  - Linux: PipeWire / ALSA
+  - Multi-M3U playlist switching
+  - Dynamic device switching across all audio endpoints
+  - Full output gain & device volume fix (BASS_SetVolume)
+"""
+
 import sys
-import glob
-import json
+import os
 import platform
-import urllib.request
-import threading
 import ctypes
+from ctypes import wintypes
+import urllib.request
+import urllib.parse
+import threading
+import time
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
-
-IS_WINDOWS = platform.system() == "Windows"
-IS_LINUX = platform.system() == "Linux"
+from tkinter import ttk, messagebox
 
 # ==========================================
-# パス解決
+# プラットフォーム判定 & パス解決
 # ==========================================
+OS_NAME = platform.system()
+IS_WINDOWS = OS_NAME == "Windows"
+IS_LINUX = OS_NAME == "Linux"
+
 def get_bundle_dir():
-    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    if getattr(sys, 'frozen', False):
         return sys._MEIPASS
     return os.path.dirname(os.path.abspath(__file__))
 
 def get_app_dir():
     if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
+        return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
-bundle_dir = get_bundle_dir()
-app_dir = get_app_dir()
+BUNDLE_DIR = get_bundle_dir()
+APP_DIR = get_app_dir()
 
 def find_binary(filename):
-    p1 = os.path.join(bundle_dir, filename)
-    if os.path.exists(p1):
-        return p1
-    p2 = os.path.join(app_dir, filename)
-    if os.path.exists(p2):
-        return p2
-    return p1
+    candidates = [
+        os.path.join(BUNDLE_DIR, filename),
+        os.path.join(APP_DIR, filename),
+        os.path.join(APP_DIR, "libs", filename),
+        filename
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return filename
 
 # ==========================================
-# 呼出規約・型ラッパーの共通化
+# BASS 構造体 & 型定義
 # ==========================================
-if IS_WINDOWS:
-    from ctypes import wintypes
-    B_BOOL = wintypes.BOOL
-    B_DWORD = wintypes.DWORD
-    B_HWND = wintypes.HWND
-    CALLBACK_TYPE = ctypes.WINFUNCTYPE
-    load_lib = ctypes.WinDLL
-else:
-    B_BOOL = ctypes.c_bool
-    B_DWORD = ctypes.c_uint32
-    B_HWND = ctypes.c_void_p
-    CALLBACK_TYPE = ctypes.CFUNCTYPE
-    load_lib = ctypes.CDLL
+B_BOOL = wintypes.BOOL if IS_WINDOWS else ctypes.c_bool
+B_DWORD = wintypes.DWORD if IS_WINDOWS else ctypes.c_uint32
+B_QWORD = ctypes.c_uint64
 
-# ==========================================
-# 構造体・コールバック型定義
-# ==========================================
 class BASS_DEVICEINFO(ctypes.Structure):
     _fields_ = [
         ("name", ctypes.c_char_p),
         ("driver", ctypes.c_char_p),
         ("flags", B_DWORD),
-    ]
-
-class BASS_ASIO_DEVICEINFO(ctypes.Structure):
-    _fields_ = [
-        ("name", ctypes.c_char_p),
-        ("driver", ctypes.c_char_p),
     ]
 
 class BASS_CHANNELINFO(ctypes.Structure):
@@ -78,707 +76,582 @@ class BASS_CHANNELINFO(ctypes.Structure):
         ("flags", B_DWORD),
         ("ctype", B_DWORD),
         ("origres", B_DWORD),
-        ("plugin", B_DWORD),
-        ("sample", B_DWORD),
+        ("plugin", ctypes.c_void_p),
+        ("sample", ctypes.c_void_p),
         ("filename", ctypes.c_char_p),
     ]
 
-FILECLOSEPROC = CALLBACK_TYPE(None, ctypes.c_void_p)
-FILELENPROC = CALLBACK_TYPE(ctypes.c_uint64, ctypes.c_void_p)
-FILEREADPROC = CALLBACK_TYPE(B_DWORD, ctypes.c_void_p, B_DWORD, ctypes.c_void_p)
-FILESEEKPROC = CALLBACK_TYPE(B_BOOL, ctypes.c_uint64, ctypes.c_void_p)
-
-class BASS_FILEPROCS(ctypes.Structure):
-    _fields_ = [
-        ("close", FILECLOSEPROC),
-        ("length", FILELENPROC),
-        ("read", FILEREADPROC),
-        ("seek", FILESEEKPROC),
-    ]
-
-# 定数
-BASS_CONFIG_NET_TIMEOUT = 11
+BASS_CONFIG_NET_AGENT = 1
+BASS_CONFIG_NET_PREBUF = 5
 BASS_CONFIG_NET_BUFFER = 12
-BASS_CONFIG_NET_PREBUF = 21
-BASS_CONFIG_NET_META = 22
+BASS_CONFIG_NET_PLAYLIST = 21
+BASS_CONFIG_GVOL_STREAM = 5
+BASS_CONFIG_DEV_DEFAULT = 18
 
 BASS_STREAM_DECODE = 0x200000
-BASS_STREAM_STATUS = 0x800000
-STREAMFILE_BUFFER = 1
-
-BASS_TAG_OGG = 2
-BASS_TAG_ICY = 4
+BASS_STREAM_AUTOFREE = 0x40000
+BASS_UNICODE = 0x80000000 if IS_WINDOWS else 0
+BASS_SYNC_META = 4
+BASS_SYNC_OGG_CHANGE = 12
 BASS_TAG_META = 5
+BASS_TAG_OGG = 2
+
+# 属性定数
+BASS_ATTRIB_FREQ = 1
+BASS_ATTRIB_VOL = 2
 
 # ==========================================
-# 動的ライブラリロード
+# ライブラリの動的ロード
 # ==========================================
-bass_name = "bass.dll" if IS_WINDOWS else "libbass.so"
-flac_name = "bassflac.dll" if IS_WINDOWS else "libbassflac.so"
-asio_name = "bassasio.dll" if IS_WINDOWS else None
-
-bass_path = find_binary(bass_name)
-flac_path = find_binary(flac_name)
-asio_path = find_binary(asio_name) if asio_name else None
+bass = None
+bassflac = None
+bassasio = None
 
 try:
-    bass = load_lib(bass_path)
-    bassflac = load_lib(flac_path) if os.path.exists(flac_path) else None
-    bassasio = load_lib(asio_path) if (IS_WINDOWS and os.path.exists(asio_path)) else None
+    bass_lib_name = "bass.dll" if IS_WINDOWS else "libbass.so"
+    bass_path = find_binary(bass_lib_name)
+    bass = ctypes.WinDLL(bass_path) if IS_WINDOWS else ctypes.CDLL(bass_path)
 except Exception as e:
-    root = tk.Tk()
-    root.withdraw()
-    messagebox.showerror(
-        "ライブラリエラー",
-        f"オーディオエンジンの読み込みに失敗しました。\nOS: {platform.system()}\n詳細: {e}"
-    )
-    sys.exit(1)
+    print(f"[Error] BASS ロード失敗: {e}")
 
-# BASS 基本 API 定義
-bass.BASS_Init.restype = B_BOOL
-bass.BASS_Init.argtypes = [ctypes.c_int, B_DWORD, B_DWORD, B_HWND, ctypes.c_void_p]
+try:
+    flac_lib_name = "bassflac.dll" if IS_WINDOWS else "libbassflac.so"
+    flac_path = find_binary(flac_lib_name)
+    bassflac = ctypes.WinDLL(flac_path) if IS_WINDOWS else ctypes.CDLL(flac_path)
+    if bass and bassflac:
+        bass.BASS_PluginLoad.restype = ctypes.c_void_p
+        if IS_WINDOWS:
+            bass.BASS_PluginLoad.argtypes = [ctypes.c_wchar_p, B_DWORD]
+            bass.BASS_PluginLoad(flac_path, BASS_UNICODE)
+        else:
+            bass.BASS_PluginLoad.argtypes = [ctypes.c_char_p, B_DWORD]
+            bass.BASS_PluginLoad(flac_path.encode('utf-8'), 0)
+except Exception as e:
+    print(f"[Info] FLAC プラグイン未ロード: {e}")
 
-bass.BASS_SetConfig.restype = B_BOOL
-bass.BASS_SetConfig.argtypes = [B_DWORD, B_DWORD]
+if IS_WINDOWS:
+    try:
+        asio_path = find_binary("bassasio.dll")
+        if os.path.exists(asio_path):
+            bassasio = ctypes.WinDLL(asio_path)
+    except Exception as e:
+        print(f"[Info] BASSASIO 未ロード: {e}")
 
-bass.BASS_ErrorGetCode.restype = ctypes.c_int
-bass.BASS_ErrorGetCode.argtypes = []
+# ==========================================
+# BASS 関数プロトタイプ定義
+# ==========================================
+if bass:
+    bass.BASS_Init.restype = B_BOOL
+    bass.BASS_Init.argtypes = [ctypes.c_int, B_DWORD, B_DWORD, ctypes.c_void_p, ctypes.c_void_p]
+    bass.BASS_Free.restype = B_BOOL
+    bass.BASS_SetDevice.restype = B_BOOL
+    bass.BASS_SetDevice.argtypes = [B_DWORD]
+    bass.BASS_GetDevice.restype = B_DWORD
+    bass.BASS_GetDeviceInfo.restype = B_BOOL
+    bass.BASS_GetDeviceInfo.argtypes = [B_DWORD, ctypes.POINTER(BASS_DEVICEINFO)]
 
-bass.BASS_GetDeviceInfo.restype = B_BOOL
-bass.BASS_GetDeviceInfo.argtypes = [B_DWORD, ctypes.POINTER(BASS_DEVICEINFO)]
+    bass.BASS_SetVolume.restype = B_BOOL
+    bass.BASS_SetVolume.argtypes = [ctypes.c_float]
+    bass.BASS_GetVolume.restype = ctypes.c_float
 
-bass.BASS_PluginLoad.restype = B_DWORD
-bass.BASS_PluginLoad.argtypes = [ctypes.c_char_p, B_DWORD]
+    bass.BASS_SetConfig.restype = B_BOOL
+    bass.BASS_SetConfig.argtypes = [B_DWORD, B_DWORD]
+    bass.BASS_SetConfigPtr.restype = B_BOOL
+    bass.BASS_SetConfigPtr.argtypes = [B_DWORD, ctypes.c_char_p]
 
-bass.BASS_StreamCreateURL.restype = B_DWORD
-bass.BASS_StreamCreateURL.argtypes = [ctypes.c_char_p, B_DWORD, B_DWORD, ctypes.c_void_p, ctypes.c_void_p]
+    bass.BASS_StreamCreateURL.restype = B_DWORD
+    bass.BASS_StreamCreateURL.argtypes = [ctypes.c_char_p, B_DWORD, B_DWORD, ctypes.c_void_p, ctypes.c_void_p]
+    bass.BASS_StreamFree.restype = B_BOOL
+    bass.BASS_StreamFree.argtypes = [B_DWORD]
+    bass.BASS_ChannelPlay.restype = B_BOOL
+    bass.BASS_ChannelPlay.argtypes = [B_DWORD, B_BOOL]
+    bass.BASS_ChannelStop.restype = B_BOOL
+    bass.BASS_ChannelStop.argtypes = [B_DWORD]
+    bass.BASS_ChannelGetInfo.restype = B_BOOL
+    bass.BASS_ChannelGetInfo.argtypes = [B_DWORD, ctypes.POINTER(BASS_CHANNELINFO)]
+    bass.BASS_ChannelGetData.restype = B_DWORD
+    bass.BASS_ChannelGetData.argtypes = [B_DWORD, ctypes.c_void_p, B_DWORD]
 
-bass.BASS_StreamCreateFileUser.restype = B_DWORD
-bass.BASS_StreamCreateFileUser.argtypes = [B_DWORD, B_DWORD, ctypes.POINTER(BASS_FILEPROCS), ctypes.c_void_p]
+    bass.BASS_ChannelSetAttribute.restype = B_BOOL
+    bass.BASS_ChannelSetAttribute.argtypes = [B_DWORD, B_DWORD, ctypes.c_float]
 
-bass.BASS_StreamFree.restype = B_BOOL
-bass.BASS_StreamFree.argtypes = [B_DWORD]
+    bass.BASS_ChannelSetSync.restype = ctypes.c_void_p
+    SYNCPROC = ctypes.WINFUNCTYPE(None, ctypes.c_void_p, B_DWORD, B_DWORD, ctypes.c_void_p) if IS_WINDOWS else ctypes.CFUNCTYPE(None, ctypes.c_void_p, B_DWORD, B_DWORD, ctypes.c_void_p)
+    bass.BASS_ChannelSetSync.argtypes = [B_DWORD, B_DWORD, B_QWORD, SYNCPROC, ctypes.c_void_p]
 
-bass.BASS_ChannelPlay.restype = B_BOOL
-bass.BASS_ChannelPlay.argtypes = [B_DWORD, B_BOOL]
+    bass.BASS_ChannelGetTags.restype = ctypes.c_char_p
+    bass.BASS_ChannelGetTags.argtypes = [B_DWORD, B_DWORD]
+    bass.BASS_ErrorGetCode.restype = ctypes.c_int
 
-bass.BASS_ChannelStop.restype = B_BOOL
-bass.BASS_ChannelStop.argtypes = [B_DWORD]
+# BASSASIO プロトタイプ定義 (公式仕様に準拠)
+if bassasio:
+    class BASS_ASIO_DEVICEINFO(ctypes.Structure):
+        _fields_ = [("name", ctypes.c_char_p), ("driver", ctypes.c_char_p)]
 
-bass.BASS_ChannelGetInfo.restype = B_BOOL
-bass.BASS_ChannelGetInfo.argtypes = [B_DWORD, ctypes.POINTER(BASS_CHANNELINFO)]
-
-bass.BASS_ChannelGetTags.restype = ctypes.c_void_p
-bass.BASS_ChannelGetTags.argtypes = [B_DWORD, B_DWORD]
-
-bass.BASS_Free.restype = B_BOOL
-bass.BASS_Free.argtypes = []
-
-# Windows 用 BASSASIO API 定義
-if IS_WINDOWS and bassasio:
+    bassasio.BASS_ASIO_Init.restype = B_BOOL
+    bassasio.BASS_ASIO_Init.argtypes = [ctypes.c_int, B_DWORD]
+    bassasio.BASS_ASIO_Free.restype = B_BOOL
+    bassasio.BASS_ASIO_Start.restype = B_BOOL
+    bassasio.BASS_ASIO_Start.argtypes = [B_DWORD, B_DWORD]
+    bassasio.BASS_ASIO_Stop.restype = B_BOOL
+    bassasio.BASS_ASIO_SetRate.restype = B_BOOL
+    bassasio.BASS_ASIO_SetRate.argtypes = [ctypes.c_double]
+    bassasio.BASS_ASIO_ChannelReset.restype = B_BOOL
+    bassasio.BASS_ASIO_ChannelReset.argtypes = [B_BOOL, ctypes.c_int, B_DWORD]
+    bassasio.BASS_ASIO_ChannelEnableBASS.restype = B_BOOL
+    bassasio.BASS_ASIO_ChannelEnableBASS.argtypes = [B_BOOL, B_DWORD, B_DWORD, B_BOOL]
     bassasio.BASS_ASIO_GetDeviceInfo.restype = B_BOOL
     bassasio.BASS_ASIO_GetDeviceInfo.argtypes = [B_DWORD, ctypes.POINTER(BASS_ASIO_DEVICEINFO)]
 
-    bassasio.BASS_ASIO_Init.restype = B_BOOL
-    bassasio.BASS_ASIO_Init.argtypes = [B_DWORD, B_DWORD]
-
-    bassasio.BASS_ASIO_Free.restype = B_BOOL
-    bassasio.BASS_ASIO_Free.argtypes = []
-
-    bassasio.BASS_ASIO_Start.restype = B_BOOL
-    bassasio.BASS_ASIO_Start.argtypes = [B_DWORD, B_DWORD]
-
-    bassasio.BASS_ASIO_Stop.restype = B_BOOL
-    bassasio.BASS_ASIO_Stop.argtypes = []
-
-    bassasio.BASS_ASIO_ChannelEnableBASS.restype = B_BOOL
-    bassasio.BASS_ASIO_ChannelEnableBASS.argtypes = [B_BOOL, B_DWORD, B_DWORD, B_BOOL]
-
-    bassasio.BASS_ASIO_ChannelReset.restype = B_BOOL
-    bassasio.BASS_ASIO_ChannelReset.argtypes = [B_BOOL, ctypes.c_int, B_DWORD]
-
-    bassasio.BASS_ASIO_SetRate.restype = B_BOOL
-    bassasio.BASS_ASIO_SetRate.argtypes = [ctypes.c_double]
+# ==========================================
+# プレイリストパーサー (M3U)
+# ==========================================
+def parse_m3u(filepath):
+    stations = []
+    current_title = "Unknown Station"
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("#EXTINF:"):
+                    parts = line.split(",", 1)
+                    if len(parts) > 1:
+                        current_title = parts[1].strip()
+                elif not line.startswith("#"):
+                    stations.append((current_title, line))
+                    current_title = "Unknown Station"
+    except Exception as e:
+        print(f"M3U 読み込み失敗: {e}")
+    return stations
 
 # ==========================================
-# GUI アプリケーション本体
+# メインアプリケーション GUI
 # ==========================================
-class UnifiedRadioPlayer:
+class M3URadioPlayer:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"M3U Radio Player ({platform.system()})")
-        # アイコン設定（ファイルが存在する場合に適用）
-        icon_png_path = os.path.join(app_dir, "m3u_radio_player.png")
-        icon_ico_path = os.path.join(app_dir, "m3u_radio_player.ico")
+        self.root.title("M3U Radio Player")
+        self.root.geometry("680x880")
+        self.root.minsize(580, 640)
+
+        self.load_icon()
+
+        self.stream_handle = 0
+        self.is_playing = False
+        self.stations = []
+        self.playlist_files = []
+        self.current_active_device = None
+        self.current_volume = 1.0
+
+        self.init_audio_system()
+        self.setup_ui()
+        self.reload_playlists()
+
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def load_icon(self):
+        icon_png_path = find_binary("m3u_radio_player.png")
+        icon_ico_path = find_binary("m3u_radio_player.ico")
 
         if IS_WINDOWS and os.path.exists(icon_ico_path):
-            self.root.iconbitmap(default=icon_ico_path)
-        elif os.path.exists(icon_png_path):
             try:
-                icon_img = tk.PhotoImage(file=icon_png_path)
-                self.root.iconphoto(True, icon_img)
+                self.root.iconbitmap(default=icon_ico_path)
+                return
             except Exception:
                 pass
-        self.root.geometry("660x800")
-
-        self.base_dir = app_dir
-        self.current_m3u_path = None
-        self.m3u_files = {}
-        self.asio_devices = []
-        self.current_device_id = -1
-        self.stream_handle = 0
-        self.current_station_name = ""
-        self.current_url = ""
-        self.current_title = ""
-
-        self.http_response = None
-        self.stop_stream_flag = False
-
-        # 出力モード（Windows: asio/wasapi, Linux: pipewire）
-        self.output_mode = tk.StringVar(value="asio" if IS_WINDOWS else "pipewire")
-
-        # 1. BASS 初期化
-        self.init_bass_engine()
-
-        # 2. FLAC プラグインロード
-        self.flac_loaded = False
-        if os.path.exists(flac_path):
-            encode_path = flac_path.encode("mbcs" if IS_WINDOWS else "utf-8")
-            plugin = bass.BASS_PluginLoad(encode_path, 0)
-            if plugin != 0:
-                self.flac_loaded = True
-
-        # コールバック保持
-        self.file_close_proc = FILECLOSEPROC(self._cb_close)
-        self.file_len_proc = FILELENPROC(self._cb_len)
-        self.file_read_proc = FILEREADPROC(self._cb_read)
-        self.file_seek_proc = FILESEEKPROC(self._cb_seek)
-        self.file_procs = BASS_FILEPROCS(
-            self.file_close_proc,
-            self.file_len_proc,
-            self.file_read_proc,
-            self.file_seek_proc
-        )
-
-        self.create_widgets()
-
-        if IS_WINDOWS and bassasio:
-            self.load_asio_devices()
-
-        self.refresh_m3u_list()
-        self.poll_metadata()
-
-    def init_bass_engine(self):
-        """OSに応じた最適なオーディオデバイスで初期化"""
-        bass.BASS_SetConfig(BASS_CONFIG_NET_TIMEOUT, 15000)
-        bass.BASS_SetConfig(BASS_CONFIG_NET_BUFFER, 5000)
-        bass.BASS_SetConfig(BASS_CONFIG_NET_PREBUF, 50)
-        bass.BASS_SetConfig(BASS_CONFIG_NET_META, 1)
-
-        if IS_WINDOWS:
-            # WASAPI 共有用として既定の Windows デバイス (-1) で初期化
-            bass.BASS_Init(-1, 44100, 0, None, None)
-        else:
-            # Linux: 有効な ALSA / PipeWire デバイスを検出して初期化
-            init_ok = False
-            info = BASS_DEVICEINFO()
-            dev_idx = 1
-            while bass.BASS_GetDeviceInfo(dev_idx, ctypes.byref(info)):
-                if info.flags & 1:  # BASS_DEVICE_ENABLED
-                    if bass.BASS_Init(dev_idx, 44100, 0, None, None):
-                        init_ok = True
-                        break
-                dev_idx += 1
-            if not init_ok:
-                bass.BASS_Init(1, 44100, 0, None, None)
-
-    def _cb_close(self, user):
-        if self.http_response:
+        if os.path.exists(icon_png_path):
             try:
-                self.http_response.close()
+                img = tk.PhotoImage(file=icon_png_path)
+                self.root.iconphoto(True, img)
             except Exception:
                 pass
-            self.http_response = None
 
-    def _cb_len(self, user):
-        return 0
+    def init_audio_system(self):
+        if not bass:
+            messagebox.showerror("Error", "BASS ライブラリが見つかりません。")
+            return
 
-    def _cb_read(self, buffer, length, user):
-        if self.stop_stream_flag or not self.http_response:
-            return 0
+        bass.BASS_SetConfig(BASS_CONFIG_NET_PLAYLIST, 1)
+        bass.BASS_SetConfig(BASS_CONFIG_GVOL_STREAM, 10000)
+
         try:
-            chunk = self.http_response.read(length)
-            if not chunk:
-                return 0
-            ctypes.memmove(buffer, chunk, len(chunk))
-            return len(chunk)
+            bass.BASS_SetConfigPtr(BASS_CONFIG_NET_AGENT, b"Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+            bass.BASS_SetConfig(BASS_CONFIG_NET_BUFFER, 5000)
+            bass.BASS_SetConfig(BASS_CONFIG_NET_PREBUF, 50)
         except Exception:
-            return 0
+            pass
 
-    def _cb_seek(self, offset, user):
-        return False
+    def setup_ui(self):
+        main_frame = ttk.Frame(self.root, padding=12)
+        main_frame.pack(fill=tk.BOTH, expand=True)
 
-    def create_widgets(self):
-        # 1. プレイリスト選択
-        m3u_frame = ttk.LabelFrame(self.root, text="プレイリスト (M3U)", padding=8)
-        m3u_frame.pack(fill=tk.X, padx=10, pady=5)
+        out_box = ttk.LabelFrame(main_frame, text=" オーディオ出力エンジン & 出力先 ", padding=10)
+        out_box.pack(fill=tk.X, pady=(0, 10))
 
-        self.m3u_combo = ttk.Combobox(m3u_frame, state="readonly")
-        self.m3u_combo.pack(fill=tk.X, side=tk.LEFT, expand=True, padx=(0, 5))
-        self.m3u_combo.bind("<<ComboboxSelected>>", self.on_m3u_selected)
+        mode_frame = ttk.Frame(out_box)
+        mode_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(mode_frame, text="出力モード:").pack(side=tk.LEFT, padx=(0, 6))
 
-        browse_btn = ttk.Button(m3u_frame, text="参照...", width=7, command=self.browse_m3u_file)
-        browse_btn.pack(side=tk.RIGHT, padx=(2, 0))
-
-        reload_btn = ttk.Button(m3u_frame, text="再読込", width=7, command=self.refresh_m3u_list)
-        reload_btn.pack(side=tk.RIGHT)
-
-        # 2. オーディオ出力設定
-        out_frame = ttk.LabelFrame(self.root, text="オーディオ出力設定", padding=8)
-        out_frame.pack(fill=tk.X, padx=10, pady=5)
-
+        self.mode_var = tk.StringVar()
         if IS_WINDOWS:
-            mode_box = ttk.Frame(out_frame)
-            mode_box.pack(fill=tk.X, pady=(0, 6))
-
-            ttk.Label(mode_box, text="出力モード:").pack(side=tk.LEFT, padx=(0, 10))
-
-            rb_asio = ttk.Radiobutton(
-                mode_box, text="ASIO (排他/ビットパーフェクト)", value="asio",
-                variable=self.output_mode, command=self.on_mode_changed
-            )
-            rb_asio.pack(side=tk.LEFT, padx=5)
-
-            rb_wasapi = ttk.Radiobutton(
-                mode_box, text="WASAPI 共有モード", value="wasapi",
-                variable=self.output_mode, command=self.on_mode_changed
-            )
-            rb_wasapi.pack(side=tk.LEFT, padx=5)
-
-            self.asio_box = ttk.Frame(out_frame)
-            self.asio_box.pack(fill=tk.X)
-
-            ttk.Label(self.asio_box, text="ASIOドライバ:").pack(side=tk.LEFT, padx=(0, 5))
-            self.device_combo = ttk.Combobox(self.asio_box, state="readonly")
-            self.device_combo.pack(fill=tk.X, side=tk.LEFT, expand=True, padx=(0, 5))
-            self.device_combo.bind("<<ComboboxSelected>>", self.on_device_selected)
-
-            refresh_dev_btn = ttk.Button(self.asio_box, text="更新", width=7, command=self.load_asio_devices)
-            refresh_dev_btn.pack(side=tk.RIGHT)
+            modes = ["標準 (DirectSound / BASS Direct)"]
+            if bassasio:
+                modes.append("ASIO")
+            self.mode_var.set("標準 (DirectSound / BASS Direct)")
         else:
-            linux_box = ttk.Frame(out_frame)
-            linux_box.pack(fill=tk.X)
-            ttk.Label(linux_box, text="バックエンド: PipeWire / ALSA 直結 (自動追従)").pack(side=tk.LEFT)
+            modes = ["PipeWire / ALSA"]
+            self.mode_var.set("PipeWire / ALSA")
 
-        # 3. Now Playing
-        font_family = "Segoe UI" if IS_WINDOWS else "Sans"
-        info_frame = ttk.LabelFrame(self.root, text="Now Playing", padding=12)
-        info_frame.pack(fill=tk.X, padx=10, pady=5)
+        self.mode_combo = ttk.Combobox(mode_frame, textvariable=self.mode_var, values=modes, state="readonly", width=28)
+        self.mode_combo.pack(side=tk.LEFT)
+        self.mode_combo.bind("<<ComboboxSelected>>", self.on_mode_changed)
 
-        self.track_label = ttk.Label(
-            info_frame,
-            text="再生待機中",
-            font=(font_family, 15, "bold"),
-            foreground="#004488",
-            wraplength=610
-        )
-        self.track_label.pack(anchor="w", pady=(0, 4))
+        dev_frame = ttk.Frame(out_box)
+        dev_frame.pack(fill=tk.X, pady=(6, 2))
+        ttk.Label(dev_frame, text="出力デバイス:").pack(side=tk.LEFT, padx=(0, 6))
 
-        self.station_label = ttk.Label(
-            info_frame,
-            text="局: 停止中",
-            font=(font_family, 9),
-            foreground="#555555"
-        )
-        self.station_label.pack(anchor="w")
+        self.device_combo = ttk.Combobox(dev_frame, state="readonly")
+        self.device_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.device_combo.bind("<<ComboboxSelected>>", self.on_device_changed)
 
-        # 4. ステーション一覧
-        list_frame = ttk.LabelFrame(self.root, text="ステーション一覧", padding=8)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.update_device_list()
 
-        self.tree = ttk.Treeview(list_frame, columns=("URL",), selectmode="browse")
-        self.tree.heading("#0", text="局名")
-        self.tree.heading("URL", text="ストリームURL")
-        self.tree.column("#0", width=220)
-        self.tree.column("URL", width=390)
+        status_box = ttk.LabelFrame(main_frame, text=" 再生ステータス ", padding=10)
+        status_box.pack(fill=tk.X, pady=(0, 10))
+
+        self.lbl_station = ttk.Label(status_box, text="未再生", font=("Segoe UI", 11, "bold"))
+        self.lbl_station.pack(anchor=tk.W)
+
+        self.lbl_track = ttk.Label(status_box, text="タイトル: ---", foreground="#1a73e8", font=("Segoe UI", 10))
+        self.lbl_track.pack(anchor=tk.W, pady=2)
+
+        self.lbl_info = ttk.Label(status_box, text="形式: --- | サンプリングレート: ---", foreground="#555555")
+        self.lbl_info.pack(anchor=tk.W)
+
+        list_box = ttk.LabelFrame(main_frame, text=" 放送局一覧 ", padding=8)
+        list_box.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        pl_bar = ttk.Frame(list_box)
+        pl_bar.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(pl_bar, text="プレイリスト:").pack(side=tk.LEFT, padx=(0, 6))
+
+        self.pl_var = tk.StringVar()
+        self.pl_combo = ttk.Combobox(pl_bar, textvariable=self.pl_var, state="readonly", width=30)
+        self.pl_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.pl_combo.bind("<<ComboboxSelected>>", self.on_playlist_changed)
+
+        tree_frame = ttk.Frame(list_box)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(tree_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.tree = ttk.Treeview(tree_frame, columns=("Title", "URL"), show="headings", yscrollcommand=scrollbar.set)
+        scrollbar.config(command=self.tree.yview)
+
+        self.tree.heading("Title", text="ステーション名")
+        self.tree.heading("URL", text="ストリーム URL")
+        self.tree.column("Title", width=220, anchor=tk.W)
+        self.tree.column("URL", width=380, anchor=tk.W)
         self.tree.pack(fill=tk.BOTH, expand=True)
 
-        self.tree.bind("<<TreeviewSelect>>", self.on_select)
+        self.tree.bind("<Double-1>", lambda e: self.play_selected())
 
-        # 5. 操作バー
-        ctrl_frame = ttk.Frame(self.root, padding=5)
-        ctrl_frame.pack(fill=tk.X, padx=10, pady=5)
+        # -----------------------------
+        # 音量 & コントロールエリア
+        # -----------------------------
+        ctrl_frame = ttk.Frame(main_frame)
+        ctrl_frame.pack(fill=tk.X, pady=(4, 0))
 
-        flac_status = "FLAC有効" if self.flac_loaded else "FLAC未認識"
-        default_status = f"OS: {platform.system()} | {flac_status}"
-        self.status_lbl = ttk.Label(ctrl_frame, text=default_status, foreground="#007700")
-        self.status_lbl.pack(side=tk.LEFT, padx=5)
+        self.btn_play = ttk.Button(ctrl_frame, text="▶ 再生", width=10, command=self.play_selected)
+        self.btn_play.pack(side=tk.LEFT, padx=(0, 6))
 
-        self.stop_btn = ttk.Button(ctrl_frame, text="停止", width=10, command=self.stop)
-        self.stop_btn.pack(side=tk.RIGHT, padx=5)
+        self.btn_stop = ttk.Button(ctrl_frame, text="■ 停止", width=10, command=self.stop)
+        self.btn_stop.pack(side=tk.LEFT, padx=(0, 12))
 
-    def on_mode_changed(self):
-        if not IS_WINDOWS:
-            return
-        mode = self.output_mode.get()
-        if mode == "asio":
-            self.device_combo.config(state="readonly")
-            self.status_lbl.config(text="出力: ASIO (排他) モード", foreground="#007700")
-        else:
-            self.device_combo.config(state="disabled")
-            self.status_lbl.config(text="出力: WASAPI 共有モード", foreground="#004488")
+        ttk.Label(ctrl_frame, text="音量:").pack(side=tk.LEFT, padx=(0, 4))
+        self.vol_scale = ttk.Scale(ctrl_frame, from_=0.0, to=1.0, value=1.0, command=self.on_volume_changed, length=140)
+        self.vol_scale.pack(side=tk.LEFT, padx=(0, 6))
 
-        if self.stream_handle and self.current_station_name and self.current_url:
-            self.play(self.current_station_name, self.current_url)
+        self.lbl_vol = ttk.Label(ctrl_frame, text="100%", width=5)
+        self.lbl_vol.pack(side=tk.LEFT)
 
-    def load_asio_devices(self):
-        if not (IS_WINDOWS and bassasio):
-            return
-        self.asio_devices.clear()
-        device_names = []
-        info = BASS_ASIO_DEVICEINFO()
-        dev_idx = 0
+        self.btn_reload = ttk.Button(ctrl_frame, text="プレイリスト再読込", command=self.reload_playlists)
+        self.btn_reload.pack(side=tk.RIGHT)
 
-        while bassasio.BASS_ASIO_GetDeviceInfo(dev_idx, ctypes.byref(info)):
-            name = info.name.decode('shift_jis', errors='ignore') if info.name else f"Device {dev_idx}"
-            self.asio_devices.append((dev_idx, name))
-            device_names.append(name)
-            dev_idx += 1
+    def on_volume_changed(self, val):
+        self.current_volume = float(val)
+        percent = int(self.current_volume * 100)
+        self.lbl_vol.config(text=f"{percent}%")
+        if self.stream_handle and bass:
+            bass.BASS_ChannelSetAttribute(self.stream_handle, BASS_ATTRIB_VOL, ctypes.c_float(self.current_volume))
+        if bass:
+            bass.BASS_SetVolume(ctypes.c_float(self.current_volume))
 
-        if device_names:
-            self.device_combo["values"] = device_names
-            self.device_combo.current(0)
-            self.init_asio_device(0)
-        else:
-            self.device_combo["values"] = ["ASIOドライバが見つかりません"]
-            self.device_combo.current(0)
+    def update_device_list(self):
+        mode = self.mode_var.get()
+        dev_names = []
+        self.device_mapping = []
+        seen_names = set()
 
-    def on_device_selected(self, event):
-        idx = self.device_combo.current()
-        if 0 <= idx < len(self.asio_devices):
-            self.init_asio_device(self.asio_devices[idx][0])
+        if IS_WINDOWS:
+            if mode == "ASIO" and bassasio:
+                info = BASS_ASIO_DEVICEINFO()
+                idx = 0
+                # BASS_ASIO_GetDeviceInfo を 0 から呼び出し、False が返るまで安全に列挙
+                while bassasio.BASS_ASIO_GetDeviceInfo(idx, ctypes.byref(info)):
+                    raw = info.name or b""
+                    try:
+                        dname = raw.decode('utf-8')
+                    except UnicodeDecodeError:
+                        dname = raw.decode('cp932', errors='ignore')
 
-    def init_asio_device(self, dev_id):
-        if not (IS_WINDOWS and bassasio):
-            return
-        if self.current_device_id == dev_id:
-            return
-
-        bassasio.BASS_ASIO_Stop()
-        bassasio.BASS_ASIO_Free()
-
-        if bassasio.BASS_ASIO_Init(dev_id, 0):
-            self.current_device_id = dev_id
-            dev_name = self.asio_devices[dev_id][1]
-            if self.output_mode.get() == "asio":
-                self.status_lbl.config(text=f"ASIO: {dev_name} (接続)", foreground="#007700")
-
-    def refresh_m3u_list(self):
-        m3u_patterns = [
-            os.path.join(self.base_dir, "*.m3u"),
-            os.path.join(self.base_dir, "*.m3u8")
-        ]
-        found_files = []
-        for pat in m3u_patterns:
-            found_files.extend(glob.glob(pat))
-
-        self.m3u_files.clear()
-        display_names = []
-
-        for path in sorted(found_files):
-            filename = os.path.basename(path)
-            self.m3u_files[filename] = path
-            display_names.append(filename)
-
-        if display_names:
-            self.m3u_combo["values"] = display_names
-            current_filename = os.path.basename(self.current_m3u_path) if self.current_m3u_path else None
-            if current_filename in self.m3u_files:
-                self.m3u_combo.set(current_filename)
+                    if dname not in seen_names:
+                        seen_names.add(dname)
+                        dev_names.append(dname)
+                        self.device_mapping.append(idx)
+                    idx += 1
             else:
-                self.m3u_combo.current(0)
-                self.load_stations_from_file(self.m3u_files[display_names[0]])
+                info = BASS_DEVICEINFO()
+                idx = 1
+                while bass.BASS_GetDeviceInfo(idx, ctypes.byref(info)):
+                    is_enabled = bool(info.flags & 1)
+                    if is_enabled:
+                        raw = info.name or b""
+                        try:
+                            dname = raw.decode('utf-8')
+                        except UnicodeDecodeError:
+                            dname = raw.decode('cp932', errors='ignore')
+
+                        if dname not in seen_names:
+                            seen_names.add(dname)
+                            dev_names.append(dname)
+                            self.device_mapping.append(idx)
+                    idx += 1
         else:
-            self.m3u_combo["values"] = ["M3Uファイルがありません (参照から開く)"]
-            self.m3u_combo.current(0)
-            self.clear_station_list()
+            dev_names = ["PipeWire / デフォルト出力"]
+            self.device_mapping = [-1]
 
-    def on_m3u_selected(self, event):
-        selected_name = self.m3u_combo.get()
-        if selected_name in self.m3u_files:
-            self.load_stations_from_file(self.m3u_files[selected_name])
+        if not dev_names:
+            dev_names = ["既定のオーディオデバイス"]
+            self.device_mapping = [-1]
 
-    def browse_m3u_file(self):
-        file_path = filedialog.askopenfilename(
-            title="M3Uプレイリストを開く",
-            filetypes=[("M3U Playlist", "*.m3u;*.m3u8"), ("All Files", "*.*")]
-        )
-        if file_path:
-            filename = os.path.basename(file_path)
-            self.m3u_files[filename] = file_path
-            current_values = list(self.m3u_combo["values"])
-            if filename not in current_values:
-                current_values.append(filename)
-                self.m3u_combo["values"] = current_values
-            self.m3u_combo.set(filename)
-            self.load_stations_from_file(file_path)
+        self.device_combo['values'] = dev_names
 
-    def load_stations_from_file(self, path):
-        self.current_m3u_path = path
-        stations = self.parse_m3u(path)
+        default_idx = 0
+        for i, name in enumerate(dev_names):
+            if any(k in name for k in ["Digital Output", "SPDIF", "Realtek"]):
+                default_idx = i
+                break
+        self.device_combo.current(default_idx)
 
-        self.clear_station_list()
-        for name, url in stations:
-            self.tree.insert("", tk.END, text=name, values=(url,))
+    def on_mode_changed(self, event=None):
+        self.update_device_list()
+        if self.is_playing:
+            self.play_selected()
 
-    def clear_station_list(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+    def on_device_changed(self, event=None):
+        if self.is_playing:
+            self.play_selected()
 
-    def parse_m3u(self, path):
-        stations = []
-        current_name = "Unknown Station"
+    def reload_playlists(self):
+        self.playlist_files = []
         try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if line.startswith("#EXTINF:"):
-                        parts = line.split(",", 1)
-                        if len(parts) > 1:
-                            current_name = parts[1].strip()
-                    elif not line.startswith("#"):
-                        stations.append((current_name, line))
-                        current_name = "Unknown Station"
+            for f in sorted(os.listdir(APP_DIR)):
+                if f.lower().endswith(".m3u"):
+                    self.playlist_files.append(f)
         except Exception as e:
-            messagebox.showerror("エラー", f"M3Uファイルの読み込みに失敗しました:\n{e}")
-        return stations
+            print(f"プレイリストスキャンエラー: {e}")
 
-    def on_select(self, event):
-        selected_item = self.tree.selection()
-        if not selected_item:
-            return
-        station_name = self.tree.item(selected_item[0])["text"]
-        url = self.tree.item(selected_item[0])["values"][0]
-        self.play(station_name, url)
-
-    def play(self, station_name, url):
-        self.stop()
-
-        self.current_station_name = station_name
-        self.station_label.config(text=f"局: {station_name}")
-        self.track_label.config(text="接続中 (バッファリング)...")
-
-        target_url = url.strip()
-        is_rp = "radioparadise.com" in target_url
-
-        if is_rp:
-            if target_url.startswith("http://"):
-                target_url = "https://" + target_url[7:]
-            if target_url.endswith("m"):
-                target_url = target_url[:-1]
-
-        self.current_url = target_url
-        self.current_title = ""
-        self.stop_stream_flag = False
-
-        use_asio = (IS_WINDOWS and self.output_mode.get() == "asio")
-
-        flags = BASS_STREAM_STATUS
-        if use_asio:
-            flags |= BASS_STREAM_DECODE
-
-        self.stream_handle = 0
-
-        # Radio Paradise または FLAC 局の場合は、Python経由でヘッダーを偽装して接続
-        if is_rp or "flac" in target_url.lower():
-            try:
-                ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' if IS_WINDOWS else 'Mozilla/5.0 (X11; Linux x86_64)'
-                headers = {'User-Agent': ua, 'Icy-MetaData': '1'}
-                req = urllib.request.Request(target_url, headers=headers)
-                self.http_response = urllib.request.urlopen(req, timeout=10)
-
-                self.stream_handle = bass.BASS_StreamCreateFileUser(
-                    STREAMFILE_BUFFER,
-                    flags,
-                    ctypes.byref(self.file_procs),
-                    None
-                )
-            except Exception as e:
-                print(f"カスタムストリーム接続失敗: {e}")
-                self.stream_handle = 0
-
-        # 通常局、またはカスタム接続失敗時は標準 URL オープン
-        if not self.stream_handle:
-            self.stream_handle = bass.BASS_StreamCreateURL(
-                target_url.encode("utf-8"),
-                0,
-                flags,
-                None,
-                None
-            )
-
-        if not self.stream_handle:
-            err_code = bass.BASS_ErrorGetCode()
-            messagebox.showerror(
-                "再生エラー",
-                f"ストリームを開けませんでした。\nエラーコード: {err_code}\nURL: {target_url}"
-            )
-            self.track_label.config(text="停止中")
-            return
-
-        info = BASS_CHANNELINFO()
-        bass.BASS_ChannelGetInfo(self.stream_handle, ctypes.byref(info))
-
-        # 出力振り分け
-        if use_asio and bassasio:
-            bassasio.BASS_ASIO_SetRate(ctypes.c_double(info.freq))
-            bassasio.BASS_ASIO_ChannelReset(False, -1, 0)
-            bassasio.BASS_ASIO_ChannelEnableBASS(False, 0, self.stream_handle, True)
-            bassasio.BASS_ASIO_Start(0, 0)
+        if self.playlist_files:
+            self.pl_combo['values'] = self.playlist_files
+            current = self.pl_var.get()
+            if current not in self.playlist_files:
+                self.pl_combo.current(0)
+            self.load_active_playlist()
         else:
-            # Linux (PipeWire/ALSA) または Windows WASAPI共有モード
-            bass.BASS_ChannelPlay(self.stream_handle, False)
+            self.pl_combo['values'] = ["M3Uファイルがありません"]
+            self.pl_combo.current(0)
+            for row in self.tree.get_children():
+                self.tree.delete(row)
+            self.tree.insert("", tk.END, values=("プレイリストがありません (*.m3uを配置)", ""))
 
-        self.track_label.config(text="再生中 (曲名取得中...)")
-        self.extract_metadata()
+    def on_playlist_changed(self, event=None):
+        self.load_active_playlist()
 
-    def extract_metadata(self):
-        if not self.stream_handle:
+    def load_active_playlist(self):
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+
+        fname = self.pl_var.get()
+        target_path = os.path.join(APP_DIR, fname)
+        if not os.path.exists(target_path):
             return
 
-        found_title = ""
+        self.stations = parse_m3u(target_path)
+        for title, url in self.stations:
+            self.tree.insert("", tk.END, values=(title, url))
 
-        # 1. BASS_TAG_META (DI.FM, SomaFM などの ICY チャンク)
-        meta_ptr = bass.BASS_ChannelGetTags(self.stream_handle, BASS_TAG_META)
-        if meta_ptr:
-            try:
-                raw_meta = ctypes.string_at(meta_ptr).decode("utf-8", errors="ignore")
-                for part in raw_meta.split(";"):
-                    part = part.strip()
-                    if part.startswith("StreamTitle='") and part.endswith("'"):
-                        t = part[13:-1].strip()
-                        if t:
-                            found_title = t
-                            break
-            except Exception:
-                pass
-
-        # 2. BASS_TAG_OGG (Vorbis Comment)
-        if not found_title:
-            ogg_ptr = bass.BASS_ChannelGetTags(self.stream_handle, BASS_TAG_OGG)
-            if ogg_ptr:
-                try:
-                    raw_bytes = ctypes.string_at(ogg_ptr, 4096)
-                    entries = raw_bytes.split(b'\x00')
-                    artist, title = "", ""
-                    for entry in entries:
-                        if not entry:
-                            break
-                        line = entry.decode("utf-8", errors="ignore")
-                        if "=" in line:
-                            k, v = line.split("=", 1)
-                            if k.upper() == "TITLE":
-                                title = v.strip()
-                            elif k.upper() == "ARTIST":
-                                artist = v.strip()
-
-                    if artist and title:
-                        found_title = f"{artist} - {title}"
-                    elif title:
-                        found_title = title
-                except Exception:
-                    pass
-
-        # 3. BASS_TAG_ICY (フォールバック)
-        if not found_title and not self.current_title:
-            icy_ptr = bass.BASS_ChannelGetTags(self.stream_handle, BASS_TAG_ICY)
-            if icy_ptr:
-                try:
-                    raw_icy = ctypes.string_at(icy_ptr, 2048)
-                    for line in raw_icy.split(b'\x00'):
-                        line_str = line.decode("utf-8", errors="ignore")
-                        if line_str.lower().startswith("icy-name:"):
-                            station_info = line_str.split(":", 1)[1].strip()
-                            if station_info:
-                                self.track_label.config(text=f"[{station_info}]")
-                except Exception:
-                    pass
-
-        if found_title and found_title != self.current_title:
-            self.current_title = found_title
-            self.track_label.config(text=found_title)
-
-        # 4. Radio Paradise 用 Web API
-        if "radioparadise.com" in self.current_url:
-            self.fetch_rp_metadata()
-
-    def fetch_rp_metadata(self):
-        def _fetch():
-            chan = "0"
-            if "mellow" in self.current_url:
-                chan = "1"
-            elif "rock" in self.current_url:
-                chan = "2"
-            elif "global" in self.current_url:
-                chan = "3"
-
-            api_url = f"https://api.radioparadise.com/api/now_playing?chan={chan}"
-            try:
-                req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=3) as res:
-                    data = json.loads(res.read().decode('utf-8'))
-                    artist = data.get("artist", "")
-                    title = data.get("title", "")
-                    if artist and title:
-                        display = f"{artist} - {title}"
-                        if display != self.current_title:
-                            self.current_title = display
-                            self.root.after(0, lambda: self.track_label.config(text=display))
-            except Exception:
-                pass
-
-        threading.Thread(target=_fetch, daemon=True).start()
-
-    def poll_metadata(self):
-        if self.stream_handle:
-            self.extract_metadata()
-        self.root.after(1000, self.poll_metadata)
+        if self.stations:
+            first = self.tree.get_children()[0]
+            self.tree.selection_set(first)
 
     def stop(self):
-        self.stop_stream_flag = True
-        if self.http_response:
-            try:
-                self.http_response.close()
-            except Exception:
-                pass
-            self.http_response = None
-
         if self.stream_handle:
-            if IS_WINDOWS and bassasio and self.output_mode.get() == "asio":
+            if IS_WINDOWS and bassasio:
                 bassasio.BASS_ASIO_Stop()
-                bassasio.BASS_ASIO_ChannelReset(False, -1, 0)
-            else:
-                bass.BASS_ChannelStop(self.stream_handle)
-
+            bass.BASS_ChannelStop(self.stream_handle)
             bass.BASS_StreamFree(self.stream_handle)
             self.stream_handle = 0
 
-        self.current_url = ""
-        self.current_title = ""
-        self.station_label.config(text="局: 停止中")
-        self.track_label.config(text="停止中")
+        self.is_playing = False
+        self.lbl_station.config(text="停止中")
+        self.lbl_track.config(text="タイトル: ---")
+        self.lbl_info.config(text="形式: --- | サンプリングレート: ---")
+
+    def play_selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        item = self.tree.item(sel[0])
+        title, url = item['values']
+        if not url:
+            return
+
+        self.lbl_station.config(text=f"接続中: {title} ...")
+        threading.Thread(target=self._play_worker, args=(title, url), daemon=True).start()
+
+    def _play_worker(self, title, url):
+        self.stop()
+        time.sleep(0.05)
+
+        mode = self.mode_var.get()
+        dev_idx = self.device_mapping[self.device_combo.current()] if self.device_mapping else -1
+
+        use_asio = (IS_WINDOWS and mode == "ASIO")
+        flags = BASS_STREAM_DECODE if use_asio else BASS_STREAM_AUTOFREE
+
+        if not use_asio:
+            target_device = dev_idx if dev_idx != -1 else -1
+
+            if self.current_active_device != target_device:
+                bass.BASS_Free()
+                if not bass.BASS_Init(target_device, 44100, 0, None, None):
+                    err = bass.BASS_ErrorGetCode()
+                    if err != 14:
+                        print(f"[Warn] BASS_Init failed: code {err}")
+                self.current_active_device = target_device
+
+            bass.BASS_SetDevice(target_device)
+            bass.BASS_SetVolume(ctypes.c_float(1.0))
+        else:
+            if self.current_active_device != -1:
+                bass.BASS_Free()
+                bass.BASS_Init(-1, 44100, 0, None, None)
+                self.current_active_device = -1
+            bass.BASS_SetDevice(-1)
+
+        bass.BASS_SetConfig(BASS_CONFIG_GVOL_STREAM, 10000)
+
+        url_bytes = str(url).strip().encode('utf-8')
+        handle = bass.BASS_StreamCreateURL(url_bytes, 0, flags, None, None)
+
+        if not handle:
+            err = bass.BASS_ErrorGetCode()
+            self.root.after(0, lambda: self.lbl_station.config(text=f"接続失敗 (Error: {err})"))
+            return
+
+        self.stream_handle = handle
+        self.is_playing = True
+
+        bass.BASS_ChannelSetAttribute(handle, BASS_ATTRIB_VOL, ctypes.c_float(self.current_volume))
+
+        self._setup_meta_sync(handle)
+
+        info = BASS_CHANNELINFO()
+        bass.BASS_ChannelGetInfo(handle, ctypes.byref(info))
+        freq = info.freq
+        chans = info.chans
+
+        success = False
+
+        if IS_WINDOWS and use_asio and bassasio:
+            bassasio.BASS_ASIO_Free()
+            if bassasio.BASS_ASIO_Init(dev_idx, 0):
+                bassasio.BASS_ASIO_SetRate(ctypes.c_double(freq))
+                bassasio.BASS_ASIO_ChannelReset(False, -1, 0)
+                bassasio.BASS_ASIO_ChannelEnableBASS(False, 0, handle, True)
+                success = bassasio.BASS_ASIO_Start(0, 0)
+        else:
+            if IS_LINUX:
+                bass.BASS_SetConfig(BASS_CONFIG_DEV_DEFAULT, freq)
+
+            success = bass.BASS_ChannelPlay(handle, False)
+
+        if success:
+            self.root.after(0, lambda: self.lbl_station.config(text=f"再生中: {title}"))
+            self.root.after(0, lambda: self.lbl_info.config(text=f"Ch: {chans}ch | サンプリングレート: {freq} Hz"))
+            self._update_meta_now(handle)
+        else:
+            self.root.after(0, lambda: self.lbl_station.config(text="出力デバイスの起動に失敗しました"))
+
+    # ==========================================
+    # メタデータ処理
+    # ==========================================
+    def _setup_meta_sync(self, handle):
+        def _sync_callback(sync_handle, channel, data, user):
+            self.root.after(0, lambda: self._update_meta_now(channel))
+
+        self._proc = SYNCPROC(_sync_callback)
+        bass.BASS_ChannelSetSync(handle, BASS_SYNC_META, 0, self._proc, None)
+        bass.BASS_ChannelSetSync(handle, BASS_SYNC_OGG_CHANGE, 0, self._proc, None)
+
+    def _update_meta_now(self, handle):
+        tag_meta = bass.BASS_ChannelGetTags(handle, BASS_TAG_META)
+        if tag_meta:
+            try:
+                meta_str = tag_meta.decode('utf-8', errors='ignore')
+                if "StreamTitle='" in meta_str:
+                    track = meta_str.split("StreamTitle='")[1].split("';")[0]
+                    self.lbl_track.config(text=f"タイトル: {track}")
+                    return
+            except Exception:
+                pass
+
+        tag_ogg = bass.BASS_ChannelGetTags(handle, BASS_TAG_OGG)
+        if tag_ogg:
+            try:
+                ptr = tag_ogg
+                comments = {}
+                while True:
+                    s = ctypes.string_at(ptr).decode('utf-8', errors='ignore')
+                    if not s:
+                        break
+                    if "=" in s:
+                        k, v = s.split("=", 1)
+                        comments[k.upper()] = v
+                    ptr += len(s.encode('utf-8')) + 1
+
+                artist = comments.get("ARTIST", "")
+                title = comments.get("TITLE", "")
+                if artist and title:
+                    self.lbl_track.config(text=f"タイトル: {artist} - {title}")
+                    return
+                elif title:
+                    self.lbl_track.config(text=f"タイトル: {title}")
+                    return
+            except Exception:
+                pass
 
     def on_closing(self):
         self.stop()
-        if IS_WINDOWS and bassasio:
-            bassasio.BASS_ASIO_Free()
-        bass.BASS_Free()
+        if bass:
+            bass.BASS_Free()
         self.root.destroy()
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = UnifiedRadioPlayer(root)
-    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    app = M3URadioPlayer(root)
     root.mainloop()
