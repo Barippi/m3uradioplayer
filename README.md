@@ -12,7 +12,8 @@ Linux: Supports mp3, AAC, OGG, FLAC and Pipewire.
 
 ## Screenshot
 
-![Linux](https://github.com/Barippi/m3uradioplayer/blob/main/linux.png)
+<img width="682" height="912" alt="image" src="https://github.com/user-attachments/assets/8b0d63bc-eac2-401e-811d-6da81c7470d6" />
+
 
 ## Need
 
