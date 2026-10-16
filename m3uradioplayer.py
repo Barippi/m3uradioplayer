@@ -5,10 +5,10 @@ M3U Radio Player
 Cross-platform internet radio player using BASS audio library.
 Supports:
   - Windows: 標準 (DirectSound / BASS Direct), ASIO
-  - Linux: PipeWire / ALSA (Hardware/OS volume is untouched; BASS internal volume only)
+  - Linux: PipeWire / ALSA
   - Multi-M3U playlist switching
   - Dynamic device switching across all audio endpoints
-  - Full output gain & volume normalization
+  - Pure software volume control (Never modifies OS / Hardware master volume)
   - Metadata decode with HTML entity unescaping & multi-charset fallback
 """
 
@@ -100,7 +100,7 @@ BASS_TAG_OGG = 2
 
 # 属性定数
 BASS_ATTRIB_FREQ = 1
-BASS_ATTRIB_VOL = 2
+BASS_ATTRIB_VOL = 2  # ソフトウェアチャンネル音量 (0.0 〜 1.0)
 
 # ==========================================
 # ライブラリの動的ロード
@@ -151,10 +151,6 @@ if bass:
     bass.BASS_GetDevice.restype = B_DWORD
     bass.BASS_GetDeviceInfo.restype = B_BOOL
     bass.BASS_GetDeviceInfo.argtypes = [B_DWORD, ctypes.POINTER(BASS_DEVICEINFO)]
-
-    bass.BASS_SetVolume.restype = B_BOOL
-    bass.BASS_SetVolume.argtypes = [ctypes.c_float]
-    bass.BASS_GetVolume.restype = ctypes.c_float
 
     bass.BASS_SetConfig.restype = B_BOOL
     bass.BASS_SetConfig.argtypes = [B_DWORD, B_DWORD]
@@ -244,7 +240,7 @@ class M3URadioPlayer:
         self.stations = []
         self.playlist_files = []
         self.current_active_device = None
-        self.current_volume = 1.0
+        self.current_volume = 1.0  # デフォルトは 100%（0dB、減衰なし）
 
         self.init_audio_system()
         self.setup_ui()
@@ -275,6 +271,8 @@ class M3URadioPlayer:
             return
 
         bass.BASS_SetConfig(BASS_CONFIG_NET_PLAYLIST, 1)
+
+        # BASS 内部ストリーム音量の全体スケールのみ 100% (10000) に設定（OS音量は触らない）
         bass.BASS_SetConfig(BASS_CONFIG_GVOL_STREAM, 10000)
 
         try:
@@ -386,10 +384,9 @@ class M3URadioPlayer:
         self.current_volume = float(val)
         percent = int(self.current_volume * 100)
         self.lbl_vol.config(text=f"{percent}%")
+        # BASS内部のストリームゲイン（BASS_ATTRIB_VOL）のみを変更（OSや機器の音量は一切変更しない）
         if self.stream_handle and bass:
             bass.BASS_ChannelSetAttribute(self.stream_handle, BASS_ATTRIB_VOL, ctypes.c_float(self.current_volume))
-        if IS_WINDOWS and bass:
-            bass.BASS_SetVolume(ctypes.c_float(self.current_volume))
 
     def update_device_list(self):
         mode = self.mode_var.get()
@@ -545,9 +542,7 @@ class M3URadioPlayer:
                 self.current_active_device = target_device
 
             bass.BASS_SetDevice(target_device)
-
-            if IS_WINDOWS:
-                bass.BASS_SetVolume(ctypes.c_float(1.0))
+            # ※ BASS_SetVolume は呼ばない（Windows/機器側のマスター音量を変更しない）
         else:
             if self.current_active_device != -1:
                 bass.BASS_Free()
@@ -555,6 +550,7 @@ class M3URadioPlayer:
                 self.current_active_device = -1
             bass.BASS_SetDevice(-1)
 
+        # BASS 全体ストリーム音量を 100% (10000) に維持
         bass.BASS_SetConfig(BASS_CONFIG_GVOL_STREAM, 10000)
 
         url_bytes = str(url).strip().encode('utf-8')
@@ -568,6 +564,7 @@ class M3URadioPlayer:
         self.stream_handle = handle
         self.is_playing = True
 
+        # スライダーで指定されている内部ソフトウェア音量を適用
         bass.BASS_ChannelSetAttribute(handle, BASS_ATTRIB_VOL, ctypes.c_float(self.current_volume))
 
         self._setup_meta_sync(handle)
@@ -665,4 +662,3 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = M3URadioPlayer(root)
     root.mainloop()
-
